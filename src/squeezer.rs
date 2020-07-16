@@ -1,3 +1,5 @@
+use crate::WindowSize;
+
 #[derive(Debug, PartialEq)]
 enum SqueezeState {
     /// not enabled
@@ -31,9 +33,6 @@ pub enum SqueezeAction {
     Delete,
 }
 
-/// line size
-const LSIZE: u64 = 16;
-
 impl Squeezer {
     pub fn new(enabled: bool) -> Squeezer {
         Squeezer {
@@ -46,14 +45,17 @@ impl Squeezer {
         }
     }
 
-    pub fn process(&mut self, b: u8, i: u64) {
+    pub fn process(&mut self, window_size: WindowSize, b: u8, i: u64) {
         use self::SqueezeState::*;
+
+        let full_window_size = window_size.full::<u64>();
+
         if self.state == Disabled {
             return;
         }
         let eq = b == self.byte;
 
-        if i % LSIZE == 0 {
+        if i % full_window_size == 0 {
             if !eq {
                 self.state = Probe;
             } else {
@@ -68,9 +70,9 @@ impl Squeezer {
                 };
             }
         } else if !eq {
-            if i % LSIZE == 1 {
+            if i % full_window_size == 1 {
                 self.state = Probe;
-            } else if i % LSIZE != 1 {
+            } else if i % full_window_size != 1 {
                 self.state = NoSqueeze;
             }
         }
@@ -111,7 +113,7 @@ impl Squeezer {
 mod tests {
     use super::*;
 
-    const LSIZE_USIZE: usize = LSIZE as usize;
+    const LSIZE_USIZE: usize = 16;
 
     #[test]
     fn three_same_lines() {
@@ -132,7 +134,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -162,7 +164,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             assert_eq!(s.action(), exp[line]);
@@ -194,7 +196,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -227,7 +229,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -259,7 +261,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -295,7 +297,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -345,7 +347,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             let action = s.action();
@@ -381,7 +383,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             assert_eq!(s.action(), exp[line]);
@@ -414,7 +416,7 @@ mod tests {
         let mut idx = 1;
         for z in v.chunks(LSIZE_USIZE) {
             for i in z {
-                s.process(*i, idx);
+                s.process(WindowSize::new(16).unwrap(), *i, idx);
                 idx += 1;
             }
             assert_eq!(s.action(), exp[line]);

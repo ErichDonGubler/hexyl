@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Error as AnyhowError};
 
 use thiserror::Error as ThisError;
 
-use hexyl::{BorderStyle, Input, Printer};
+use hexyl::{BorderStyle, Input, Printer, WindowSize};
 
 fn run() -> Result<(), AnyhowError> {
     let app = App::new(crate_name!())
@@ -108,11 +108,20 @@ fn run() -> Result<(), AnyhowError> {
                 .short("o")
                 .long("display-offset")
                 .takes_value(true)
+                .allow_hyphen_values(true)
                 .value_name("N")
                 .help(
                     "Add N bytes to the displayed file position. The N argument can also \
                     include a unit (see `--length` for details)",
                 ),
+        )
+        .arg(
+            Arg::with_name("window_size")
+                .short("w")
+                .long("window-size")
+                .takes_value(true)
+                .value_name("N")
+                .help("Sets the number of bytes to display per row."),
         );
 
     let matches = app.get_matches_safe()?;
@@ -198,12 +207,26 @@ fn run() -> Result<(), AnyhowError> {
         .unwrap_or_default()
         .into();
 
+    let window_size = (|| -> Result<_, AnyhowError> {
+        Ok(WindowSize::new(
+            matches
+                .value_of("window_size")
+                .map(|ws| ws.parse::<u16>())
+                .transpose()?
+                .unwrap_or(16),
+        )?)
+    })()
+    .context("failed to parse `--window-size arg {:?}`")?;
+
     let stdout = io::stdout();
     let mut stdout_lock = stdout.lock();
 
     let mut printer = Printer::new(&mut stdout_lock, show_color, border_style, squeeze);
-    printer.display_offset(display_offset);
-    printer.print_all(&mut reader).map_err(|e| anyhow!(e))?;
+    printer
+        .display_offset(display_offset)
+        .window_size(window_size)
+        .print_all(&mut reader)
+        .map_err(|e| anyhow!(e))?;
 
     Ok(())
 }

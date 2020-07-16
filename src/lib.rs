@@ -3,10 +3,13 @@ pub mod squeezer;
 
 pub use input::*;
 
+use std::convert::TryFrom;
 use std::io::{self, Read, Write};
 
 use ansi_term::Color;
 use ansi_term::Color::Fixed;
+
+use thiserror::Error as ThisError;
 
 use crate::squeezer::{SqueezeAction, Squeezer};
 
@@ -29,6 +32,52 @@ pub enum ByteCategory {
 
 #[derive(Copy, Clone)]
 struct Byte(u8);
+
+#[derive(Clone, Copy, Debug)]
+pub struct WindowSize(u16);
+
+#[derive(Debug, ThisError)]
+#[error("value is not divisible by 2")]
+pub struct WindowSizeError;
+
+impl WindowSize {
+    pub fn new(n: u16) -> Result<Self, WindowSizeError> {
+        if n % 2 == 0 {
+            Ok(Self(n))
+        } else {
+            Err(WindowSizeError)
+        }
+    }
+
+    pub fn into_inner(self) -> u16 {
+        let Self(n) = self;
+        n
+    }
+
+    fn half_and_full<T1, T2>(self) -> (T1, T2)
+    where
+        T1: From<u16>,
+        T2: From<u16>,
+    {
+        (self.half(), self.full())
+    }
+
+    fn half<T>(self) -> T
+    where
+        T: From<u16>,
+    {
+        let Self(n) = self;
+        (n / 2).into()
+    }
+
+    fn full<T>(self) -> T
+    where
+        T: From<u16>,
+    {
+        let Self(n) = self;
+        n.into()
+    }
+}
 
 impl Byte {
     fn category(self) -> ByteCategory {
@@ -152,6 +201,7 @@ pub struct Printer<'a, Writer: Write> {
     byte_char_table: Vec<String>,
     squeezer: Squeezer,
     display_offset: u64,
+    window_size: WindowSize,
 }
 
 impl<'a, Writer: Write> Printer<'a, Writer> {
@@ -191,6 +241,7 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                 .collect(),
             squeezer: Squeezer::new(use_squeeze),
             display_offset: 0,
+            window_size: WindowSize::new(16).unwrap(),
         }
     }
 
@@ -199,42 +250,65 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
         self
     }
 
-    pub fn header(&mut self) {
-        if let Some(border_elements) = self.border_style.header_elems() {
-            let h = border_elements.horizontal_line;
-            let h8 = h.to_string().repeat(8);
-            let h25 = h.to_string().repeat(25);
+    pub fn window_size(&mut self, window_size: WindowSize) -> &mut Self {
+        self.window_size = window_size;
+        self
+    }
 
-            writeln!(
-                self.writer,
-                "{l}{h8}{c}{h25}{c}{h25}{c}{h8}{c}{h8}{r}",
-                l = border_elements.left_corner,
-                c = border_elements.column_separator,
-                r = border_elements.right_corner,
-                h8 = h8,
-                h25 = h25
-            )
-            .ok();
-        }
+    fn print_border_elements<W>(
+        writer: &mut W,
+        window_size: WindowSize,
+        border_elements: BorderElements,
+    ) where
+        W: Write,
+    {
+        let half_window_size =
+            usize::try_from(window_size.half::<u16>()).expect("window size doesn't fit into usize");
+        let h = border_elements.horizontal_line;
+        let side_segment = h.to_string().repeat(half_window_size);
+        let main_segment = h.to_string().repeat(
+            half_window_size
+                .checked_mul(3)
+                .unwrap()
+                .checked_add(1)
+                .unwrap(),
+        );
+
+        let _ = writeln!(
+            writer,
+            "{l}{side_segment}{c}\
+            {main_segment}{c}{main_segment}\
+            {c}{side_segment}{c}{side_segment}{r}",
+            l = border_elements.left_corner,
+            c = border_elements.column_separator,
+            r = border_elements.right_corner,
+            side_segment = side_segment,
+            main_segment = main_segment
+        );
+    }
+
+    pub fn header(&mut self) {
+        let &mut Self {
+            ref border_style,
+            window_size,
+            ref mut writer,
+            ..
+        } = self;
+        border_style
+            .header_elems()
+            .map(|bes| Self::print_border_elements(writer, window_size, bes));
     }
 
     pub fn footer(&mut self) {
-        if let Some(border_elements) = self.border_style.footer_elems() {
-            let h = border_elements.horizontal_line;
-            let h8 = h.to_string().repeat(8);
-            let h25 = h.to_string().repeat(25);
-
-            writeln!(
-                self.writer,
-                "{l}{h8}{c}{h25}{c}{h25}{c}{h8}{c}{h8}{r}",
-                l = border_elements.left_corner,
-                c = border_elements.column_separator,
-                r = border_elements.right_corner,
-                h8 = h8,
-                h25 = h25
-            )
-            .ok();
-        }
+        let &mut Self {
+            ref border_style,
+            window_size,
+            ref mut writer,
+            ..
+        } = self;
+        border_style
+            .footer_elems()
+            .map(|bes| Self::print_border_elements(writer, window_size, bes));
     }
 
     fn print_position_indicator(&mut self) {
@@ -244,7 +318,11 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
         }
 
         let style = COLOR_OFFSET.normal();
-        let byte_index = format!("{:08x}", self.idx - 1 + self.display_offset);
+        let byte_index = format!(
+            "{:0alignment$x}",
+            self.idx - 1 + self.display_offset,
+            alignment = self.window_size.half()
+        );
         let formatted_string = if self.show_color {
             format!("{}", style.paint(byte_index))
         } else {
@@ -260,17 +338,20 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
     }
 
     pub fn print_byte(&mut self, b: u8) -> io::Result<()> {
-        if self.idx % 16 == 1 {
+        let (half_window_boundary, full_window_boundary) =
+            self.window_size.half_and_full::<u64, u64>();
+
+        if self.idx % full_window_boundary == 1 {
             self.print_position_indicator();
         }
 
         write!(&mut self.buffer_line, "{}", self.byte_hex_table[b as usize])?;
         self.raw_line.push(b);
 
-        self.squeezer.process(b, self.idx);
+        self.squeezer.process(self.window_size, b, self.idx);
 
-        match self.idx % 16 {
-            8 => {
+        match self.idx % full_window_boundary {
+            n if n == half_window_boundary => {
                 let _ = write!(&mut self.buffer_line, "{} ", self.border_style.inner_sep());
             }
             0 => {
@@ -285,6 +366,16 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
     }
 
     pub fn print_textline(&mut self) -> io::Result<()> {
+        assert!(
+            usize::try_from(self.window_size.half::<u16>())
+                .ok()
+                .and_then(|ws| ws.checked_mul(3).and_then(|s| s.checked_add(1)))
+                .is_some(),
+            "window size calculations exceed usize range",
+        );
+
+        let half_window_size = usize::try_from(self.window_size.half::<u16>()).unwrap();
+
         let len = self.raw_line.len();
 
         if len == 0 {
@@ -294,9 +385,9 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                     &mut self.buffer_line,
                     "{0:1$}{4}{0:2$}{5}{0:3$}{4}{0:3$}{5}",
                     "",
-                    24,
-                    25,
-                    8,
+                    half_window_size * 3,
+                    half_window_size * 3 + 1,
+                    half_window_size,
                     self.border_style.inner_sep(),
                     self.border_style.outer_sep(),
                 );
@@ -308,13 +399,13 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
         let squeeze_action = self.squeezer.action();
 
         if squeeze_action != SqueezeAction::Delete {
-            if len < 8 {
+            if len < half_window_size {
                 let _ = write!(
                     &mut self.buffer_line,
                     "{0:1$}{3}{0:2$}{4}",
                     "",
-                    3 * (8 - len),
-                    1 + 3 * 8,
+                    3 * (half_window_size - len),
+                    half_window_size * 3 + 1,
                     self.border_style.inner_sep(),
                     self.border_style.outer_sep(),
                 );
@@ -323,7 +414,7 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                     &mut self.buffer_line,
                     "{0:1$}{2}",
                     "",
-                    3 * (16 - len),
+                    3 * (half_window_size * 2 - len),
                     self.border_style.outer_sep()
                 );
             }
@@ -336,20 +427,20 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                     self.byte_char_table[b as usize]
                 );
 
-                if idx == 8 {
+                if idx == half_window_size {
                     let _ = write!(&mut self.buffer_line, "{}", self.border_style.inner_sep());
                 }
 
                 idx += 1;
             }
 
-            if len < 8 {
+            if len < half_window_size {
                 let _ = writeln!(
                     &mut self.buffer_line,
                     "{0:1$}{3}{0:2$}{4}",
                     "",
-                    8 - len,
-                    8,
+                    half_window_size - len,
+                    half_window_size,
                     self.border_style.inner_sep(),
                     self.border_style.outer_sep(),
                 );
@@ -358,7 +449,7 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                     &mut self.buffer_line,
                     "{0:1$}{2}",
                     "",
-                    16 - len,
+                    half_window_size * 2 - len,
                     self.border_style.outer_sep()
                 );
             }
@@ -378,9 +469,9 @@ impl<'a, Writer: Write> Printer<'a, Writer> {
                     "{5}{0}{1:2$}{5}{1:3$}{6}{1:3$}{5}{1:4$}{6}{1:4$}{5}",
                     asterisk,
                     "",
-                    7,
-                    25,
-                    8,
+                    half_window_size - 1,
+                    half_window_size * 3 + 1,
+                    half_window_size,
                     self.border_style.outer_sep(),
                     self.border_style.inner_sep(),
                 );
